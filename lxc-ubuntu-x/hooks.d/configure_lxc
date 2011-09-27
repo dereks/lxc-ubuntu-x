@@ -1,0 +1,105 @@
+#!/bin/bash
+
+HOST=$1
+ROOTFS=$2
+TEMPLATE=$3
+
+# Generate a random MAC address (so that DHCP can work).
+# The vendor prefix must be valid (even), not random!
+# Also, to avoid 3-second freezes at lxc-start and lxc-stop,
+# we use a high (higher-than-hardware) address.  
+# See https://www.redhat.com/archives/libvir-list/2010-July/msg00450.html
+#MACADDR="fe:16:3e:"`head /dev/urandom | md5sum | sed -r 's/^(.{6}).*$/\1/; s/([0-9a-f]{2})/\1:/g; s/:$//;'`
+# Actually it needs a low, not high, address: 
+# https://bugs.launchpad.net/ubuntu/+source/libvirt/+bug/584048
+MACADDR="00:00:3e:"`head /dev/urandom | md5sum | sed -r 's/^(.{6}).*$/\1/; s/([0-9a-f]{2})/\1:/g; s/:$//;'`
+
+default() {
+
+	cat > "$ROOTFS/../$HOST.conf" <<EOF
+lxc.utsname = $HOST
+
+# Terminal
+lxc.tty = 6
+lxc.pts = 1024
+
+# Capabilities 
+# 
+#     You don't need to drop capabilities.  But for security, you probably
+#     want to drop as many capabilities as you can. (See "man capabilities".)
+# 
+# - WARNING: Any read-only mount in $HOST.fstab can be remounted as 
+#   read-write unless sys_admin is dropped.  You have been warned.
+# 
+# - The hostname command needs sys_admin.  So if you drop sys_admin here, 
+#   you'll see this harmless warning at lxc-start:
+#        init: hostname main process (4) terminated with status 1
+# 
+# - iptables / ufw (and ping?) needs net_raw, so it is not dropped.
+# - OpenSSH needs sys_resource, so it is not dropped.
+#
+lxc.cap.drop=sys_admin audit_control audit_write fsetid ipc_lock ipc_owner lease linux_immutable mac_admin mac_override mknod setfcap setpcap sys_boot sys_module sys_nice sys_pacct sys_ptrace sys_rawio sys_tty_config sys_time
+
+# Network
+lxc.network.type = veth
+lxc.network.flags = up
+lxc.network.link = br0
+lxc.network.name = eth0
+lxc.network.mtu = 1500
+###lxc.network.ipv4 = $CONTAINER_IP/24
+# As appropiate (line only needed if you wish to dhcp later)
+# (Use 0.0.0.0 if you wish to dhcp later)
+lxc.network.hwaddr = $MACADDR
+lxc.network.ipv4 = 0.0.0.0/24
+
+# Filesystem
+lxc.rootfs = $ROOTFS
+lxc.mount = $ROOTFS/../$HOST.fstab
+
+# Devices 
+lxc.cgroup.devices.deny = a
+# /dev/null and zero
+lxc.cgroup.devices.allow = c 1:3 rwm
+lxc.cgroup.devices.allow = c 1:5 rwm
+# consoles
+lxc.cgroup.devices.allow = c 5:1 rwm
+lxc.cgroup.devices.allow = c 5:0 rwm
+lxc.cgroup.devices.allow = c 4:0 rwm
+lxc.cgroup.devices.allow = c 4:1 rwm
+# /dev/{,u}random
+lxc.cgroup.devices.allow = c 1:9 rwm
+lxc.cgroup.devices.allow = c 1:8 rwm
+# /dev/pts/* - pts namespaces are "coming soon"
+lxc.cgroup.devices.allow = c 136:* rwm
+lxc.cgroup.devices.allow = c 5:2 rwm
+# rtc
+lxc.cgroup.devices.allow = c 254:0 rwm
+# /dev/net/tun for OpenVPN
+lxc.cgroup.devices.allow = c 10:200 rwm
+
+EOF
+
+	# Configure the container to auto-boot.
+	# This presumes you have the upstart scripts from one of these:
+	# https://github.com/nigelmcnie/lxc-simple    
+	# https://github.com/phbaer/lxc-tools/commit/a4eb316b438f355d5c28c24f90d33c94da6b8769
+	#touch "/var/lib/lxc/$HOST/autostart"
+	
+	# Under Ubuntu:
+	# http://blog.philippklaus.de/2011/02/start-linux-containers-lxc-at-startup/
+	# We could automatically add the container to auto-start like below, however,
+	# it seems more convenient to let the user manually specify autostart.
+###	pushd /etc/default/
+###	cp -a lxc lxc-last
+###	sed "
+###s/CONTAINERS=\"/CONTAINERS=\"$HOST /
+###" < lxc-last > lxc
+###	popd
+	
+	# Ubuntu LXC also requires the .conf file to exist under /etc/lxc (by default).
+	# An alternative to doing this ln would be to edit CONF_DIR in /etc/default/lxc.
+	ln -s "$ROOTFS/../$HOST.conf" /etc/lxc/$HOST.conf || echo "(Note, /etc/lxc/$HOST.conf couldn't be created.)"
+}
+
+$TEMPLATE || default
+

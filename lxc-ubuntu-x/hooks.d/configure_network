@@ -1,0 +1,50 @@
+#!/bin/bash
+
+HOST=$1
+ROOTFS=$2
+TEMPLATE=$3
+
+# Default to the same domain as the host:
+DOMAIN=`hostname --domain`
+
+
+default() {
+
+	# We check that $ROOTFS is not "" or "/" or "./../../". The 'set -e' will exit if grep fails:
+	set -e
+	echo $ROOTFS | grep [[:alnum:]]
+
+	cat <<EOF > $ROOTFS/etc/hosts
+127.0.0.1   localhost
+127.0.1.1	$HOST.$DOMAIN	$HOST
+
+# The following lines are desirable for IPv6 capable hosts
+::1     localhost ip6-localhost ip6-loopback
+fe00::0 ip6-localnet
+ff00::0 ip6-mcastprefix
+ff02::1 ip6-allnodes
+ff02::2 ip6-allrouters
+ff02::3 ip6-allhosts
+EOF
+
+
+	cat <<EOF > $ROOTFS/etc/hostname
+$HOST
+EOF
+
+
+	cat <<EOF > $ROOTFS/etc/network/interfaces
+auto lo
+iface lo inet loopback
+
+auto eth0
+iface eth0 inet dhcp
+EOF
+
+	# NOTE: $ROOTFS/etc/dhcp3/dhclient.conf is in configure_software.
+	# (It needs to be there because dhclient.conf is not a base system file.)
+
+}
+
+$TEMPLATE || default
+

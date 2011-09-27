@@ -1,0 +1,207 @@
+#!/bin/bash
+
+HOST=$1
+ROOTFS=$2
+TEMPLATE=$3
+
+#
+# Locale settings (en_GB for Redcoats, en_US for Yanks):
+#
+LANG="en_US.UTF-8" 
+LANGUAGE="en_US.UTF-8" 
+LC_ALL="en_US.UTF-8" 
+LC_CTYPE="C"
+
+#
+# Ubuntu mirror to use:
+#
+###DEBMIRROR="http://archive.ubuntu.com/ubuntu/"
+DEBMIRROR="http://us.archive.ubuntu.com/ubuntu/"
+
+
+desktop() {
+	# First, install all the base stuff
+	default
+	
+	# Next, install the (big) ubuntu-desktop package:
+	chroot $ROOTFS DEBCONF_FRONTEND='noninteractive' apt-get install -y ubuntu-desktop	
+}
+
+
+lamp() {
+	# First, install all the base stuff
+	default   
+	
+	# MySQL still prompts.  Bug.
+	#DEBCONF_FRONTEND='noninteractive' 
+	
+	# Next, all the LAMP packages.  We must first pre-save the password
+	# for MySQL to use:
+	chroot $ROOTFS echo "mysql-server mysql-server/root_password select ubuntu" | chroot $ROOTFS debconf-set-selections
+	chroot $ROOTFS echo "mysql-server mysql-server/root_password_again select ubuntu" | chroot $ROOTFS debconf-set-selections
+	
+	chroot $ROOTFS apt-get install -y \
+	 nano mysql-server mysql-client \
+	 apache2 php5 php5-cli libapache2-mod-php5 php5-gd php5-mysql php-db php-pear php5-curl curl wget php5-ldap php5-adodb mailutils \
+	 php5-imap php5-ldap \
+	 openssl ssl-cert ldap-utils \
+	 php5-mcrypt mcrypt ufw fail2ban
+	
+	# Be sure to have a new SSL cert for this new LXC host:
+	rm -f $ROOTFS/etc/ssl/private/ssl-cert-snakeoil.key
+	chroot $ROOTFS dpkg-reconfigure ssl-cert
+
+	# Enable HTTPS:
+	chroot $ROOTFS a2enmod ssl
+	chroot $ROOTFS a2ensite default-ssl	
+
+	# Turn on MySQL replication logs by default.  (Necessary for 
+	# incremental backups, even if you're not doing replication.)
+	pushd $ROOTFS/etc/mysql/conf.d
+	echo "[mysqld]
+log-bin=mysqld-bin
+server-id = 1
+
+# For an SSH Tunneled slave:
+# See also: /etc/rc.local for the SSH Tunnel that makes this work.
+#[mysqld]
+#master-host     = 127.0.0.1
+#master-user     = root
+#master-password = ubuntu
+#master-port     = 13306
+#server-id       = 2
+	" >> replication.cnf
+	popd
+	
+	# Next, fix a couple of Debian gotchas:
+
+	# Comment out these two lines.  (Don't expire,
+	# and use the 1G default file size.
+	pushd $ROOTFS/etc/mysql
+	cp -a my.cnf my.cnf-dist
+	sed '
+s/expire_logs_days/#expire_logs_days/
+s/max_binlog_size/#max_binlog_size/
+' < my.cnf-dist > my.cnf
+	popd
+	
+	# See http://blog.bodhizazen.net/linux/lxc-configure-ubuntu-lucid-containers/
+	# This requirement is confirmed on 10.04.1 LTS.  Within LXC, the
+	# upstart "startup" signal is sent, but not "network-interface", etc.
+	pushd $ROOTFS/etc/init/
+	cp -a ufw.conf ufw.conf-dist
+	sed '
+s/start on (starting network-interface/start on startup\n#start on (starting network-interface/
+s/          or starting network-manager/#          or starting network-manager/
+s/          or starting networking)/#          or starting network-manager/
+' < ufw.conf-dist > ufw.conf
+	
+	cp -a mysql.conf mysql.conf-dist
+	sed --posix -e '
+s/start on (net-device-up/start on startup\n#start on (net-device-up/
+s/          and local-filesystems/#          and local-filesystems/
+s/\t  and runlevel \[2345\])/#\t  and runlevel \[2345\])/
+' < mysql.conf-dist > mysql.conf
+	popd
+	
+}
+
+
+default() {
+
+	# We check that $ROOTFS is not "" or "/" or "./../../". The 'set -e' will exit if grep fails:
+	set -e
+	echo $ROOTFS | grep [[:alnum:]]
+
+	# First, set the apt repositories:
+	cat > $ROOTFS/etc/apt/sources.list <<EOF
+deb $DEBMIRROR lucid main universe multiverse
+deb $DEBMIRROR lucid-security main universe multiverse
+EOF
+	chroot $ROOTFS apt-get update   # to find packages language-pack and gpgv
+	
+	# Set locales (using --force-yes to get over our missing GPG keys)
+	chroot $ROOTFS apt-get install --force-yes -y language-pack-en
+	chroot $ROOTFS locale-gen "$LANG"
+	chroot $ROOTFS /usr/sbin/update-locale LANG="$LANG" LANGUAGE="$LANGUAGE" LC_ALL="$LC_ALL" LC_CTYPE="$LC_CTYPE"
+	
+	# Get the missing GPG keys:
+	chroot $ROOTFS apt-get install --force-yes -y gpgv
+	chroot $ROOTFS apt-get update   # to get GPG keys for deb authentication
+	
+	# Install console-setup separately: BUG: Why does it still prompt?  (Moved it to debootstrap.)
+###	chroot $ROOTFS /usr/bin/env DEBCONF_FRONTEND='noninteractive' apt-get install -y console-setup
+	
+	# NOTE: Packages which depend on generated certs (like SSH and SSL) must 
+	# be reconfigured with a new cert for each new LXC container.  Otherwise you
+	# would be using a published (known) secret key across multiple hosts (that's bad!).
+	
+	# Add to the installed applications
+	chroot $ROOTFS apt-get install -y \
+		rsyslog \
+		openssh-server \
+		ubuntu-minimal
+	
+	# Create initial sudo admin user 'ubuntu'.  
+	# Note that groupadd and useradd return non-zero if the 
+	# group or user exist, so we append [...] || echo
+	# to make sure it doesn't kill the script due to set -e.
+	chroot $ROOTFS groupadd --gid 121 admin || echo "(Note, group 'admin' already existed in /etc/group.)"
+	# Make sure the admin group is id 121 like a normal install, not 1000 like in a manually added group:
+	chroot $ROOTFS groupmod --gid 121 admin
+	
+	chroot $ROOTFS useradd -m -G adm,dialout,cdrom,plugdev,admin "$INSTALL_USERNAME" -s /bin/bash || echo "(Note, user '$INSTALL_USERNAME' already existed in /etc/passwd.)"
+	# Set the password for the new user.
+	echo "$INSTALL_USERNAME:$INSTALL_PASSWORD" | chroot $ROOTFS chpasswd
+
+	# Allow group "admin" to have root (using the new /etc/sudoers.d dir)
+	echo "%admin ALL=(ALL) ALL" >> $ROOTFS/etc/sudoers.d/01_admin
+	# sudo requires strict perms on the config files:
+	chmod 0440 $ROOTFS/etc/sudoers.d/01_admin
+	
+	# Disable selinux in the container
+    mkdir -p $ROOTFS/selinux
+    echo 0 > $ROOTFS/selinux/enforce
+
+	# Generate new SSH cert, in case the template already had openssh-server installed:
+	rm -f $ROOTFS/etc/ssh/ssh_host_*key
+	rm -f $ROOTFS/etc/ssh/ssh_host_*key.pub
+	
+	# 
+	# NOTE: We run `dpkg-reconfigure openssh-server` to create
+	# new SSH certs for the new LXC host.  However, that causes
+	# sshd to be restarted on the host system.
+	# 
+	# http://serverfault.com/questions/75114/is-it-possible-to-stop-dpkg-reconfigure-restarting-services
+	# 
+	# FIXME: Why does this not work?
+	# The restart happens outside the chroot... (probably due to init signals)
+#	echo "exit 101" > $ROOTFS/usr/sbin/policy-rc.d   # Tell it to not restart OpenSSH. (rm it after)
+#	chmod +x $ROOTFS/usr/sbin/policy-rc.d
+#	chroot $ROOTFS dpkg-reconfigure openssh-server   # Regenerate certs
+#	rm $ROOTFS/usr/sbin/policy-rc.d
+	
+	# Workaround: Doing it manually (without postinst)
+	chroot $ROOTFS ssh-keygen -q -f "/etc/ssh/ssh_host_key" -N '' -t rsa1   # SSH1
+	# SSH2 (both rsa and dsa)
+	chroot $ROOTFS ssh-keygen -q -f "/etc/ssh/ssh_host_rsa_key" -N '' -t rsa   # SSH2 rsa
+	chroot $ROOTFS ssh-keygen -q -f "/etc/ssh/ssh_host_dsa_key" -N '' -t dsa   # SSH2 dsa
+	
+	# We also set up the default user to trust the keys as per the lxc-ubuntu-x.conf file:
+	# NOTE: Presuming /home/$USER.  Do we need to use getent passwd instead?
+	chroot $ROOTFS mkdir -p "/home/$INSTALL_USERNAME/.ssh"
+	chroot $ROOTFS chmod 700 "/home/$INSTALL_USERNAME/.ssh"
+	cp -af $AUTHORIZED_KEYS_TO_COPY $ROOTFS"/home/$INSTALL_USERNAME/.ssh/authorized_keys"
+	chroot $ROOTFS chmod 600 "/home/$INSTALL_USERNAME/.ssh/authorized_keys"
+
+	chroot $ROOTFS chown -R $INSTALL_USERNAME:$INSTALL_USERNAME "/home/$INSTALL_USERNAME/.ssh"
+	
+}
+
+# Don't prompt when running apt-get:
+# NOTE: Package "console-setup" still prompts unless installed w/debootstrap. (Why?)
+export DEBCONF_FRONTEND='noninteractive' 
+
+# Run the config function with given $TEMPLATE name (if it exists):
+$TEMPLATE || default
+

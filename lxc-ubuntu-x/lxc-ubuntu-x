@@ -1,0 +1,325 @@
+#!/bin/bash
+
+# References:
+# http://www.ibm.com/developerworks/linux/library/l-lxc-containers/
+# http://blog.system42.net/2010/05/18/ubuntu-1004-lxc-container-script/
+# https://github.com/phbaer/lxc-tools/blob/master/lxc-ubuntu
+# http://blog.bodhizazen.net/linux/lxc-configure-ubuntu-lucid-containers/
+# http://blog.henyo.com/2011/01/lxclinux-containers-on-ubuntu-1004.html
+# ...plus various forums and mailing lists.
+# 
+# The support for ./init scripts in /etc/init is commented out.  We use /etc/rc.local for now.
+# You can try the scripts from: https://github.com/nigelmcnie/lxc-simple
+#   wget --no-check-certificate https://github.com/nigelmcnie/lxc-simple/raw/master/upstart/lxc-autostart.conf
+#   wget --no-check-certificate https://github.com/nigelmcnie/lxc-simple/raw/master/upstart/lxc-stopall.conf
+#
+
+fix_dev() {
+	local HOST=$1
+	local ROOTFS=$2
+	
+	# We check that $ROOTFS is not "" or "/" or "./../../". The 'set -e' will exit if grep fails:
+	echo $ROOTFS | grep [[:alnum:]]
+	
+	# Fix /dev/
+	rm -rf $ROOTFS/dev
+	mkdir $ROOTFS/dev
+	mknod -m 666 $ROOTFS/dev/null c 1 3
+	mknod -m 666 $ROOTFS/dev/zero c 1 5
+	mknod -m 666 $ROOTFS/dev/random c 1 8
+	mknod -m 666 $ROOTFS/dev/urandom c 1 9
+	mkdir -m 755 $ROOTFS/dev/pts
+	mkdir -m 1777 $ROOTFS/dev/shm
+	mknod -m 666 $ROOTFS/dev/tty c 5 0
+	mknod -m 666 $ROOTFS/dev/tty0 c 4 0
+	mknod -m 666 $ROOTFS/dev/tty1 c 4 1
+	mknod -m 666 $ROOTFS/dev/tty2 c 4 2
+	mknod -m 666 $ROOTFS/dev/tty3 c 4 3
+	mknod -m 666 $ROOTFS/dev/tty4 c 4 4
+	mknod -m 600 $ROOTFS/dev/console c 5 1
+	mknod -m 666 $ROOTFS/dev/full c 1 7
+	mknod -m 600 $ROOTFS/dev/initctl p
+	mknod -m 666 $ROOTFS/dev/ptmx c 5 2
+	# For OpenVPN tun/tap support:
+	mkdir -m 755 $ROOTFS/dev/net
+	mknod -m 666 $ROOTFS/dev/net/tun c 10 200
+}
+
+fix_mtab() {
+	local HOST=$1
+	local ROOTFS=$2
+	
+	# We check that $ROOTFS is not "" or "/" or "./../../". The 'set -e' will exit if grep fails:
+	echo $ROOTFS | grep [[:alnum:]]
+	
+	# Fix /etc/mtab
+	chroot $ROOTFS rm -f /etc/mtab
+	chroot $ROOTFS ln -s /proc/mounts /etc/mtab
+}
+
+fix_init() {
+	local HOST=$1
+	local ROOTFS=$2
+	
+	#
+	# Fix init
+    #
+     
+	# We check that $ROOTFS is not "" or "/" or "./../../". The 'set -e' will exit if grep fails:
+	echo $ROOTFS | grep [[:alnum:]]
+	
+    # We use the lxc.conf init script from these sites:
+    # http://blog.system42.net/2010/05/18/ubuntu-1004-lxc-container-script/
+    # https://github.com/phbaer/lxc-tools/blob/master/lxc-ubuntu
+    # That lxc.conf script will do some upstart emits that cause the
+    # other init scripts (like mysql.conf) to start up correctly under LXC.
+    # 
+    # We also use the dedicated rootfs.fstab example from these sites:
+    # http://blog.bodhizazen.net/linux/lxc-configure-ubuntu-lucid-containers/
+    # http://blog.henyo.com/2011/01/lxclinux-containers-on-ubuntu-1004.html
+    # That style uses an fstab-formattted file and the LXC config option lxc.mount.
+    # The lxc.conf script does some redundant mounts w.r.t. the rootfs.fstab, so
+    # maybe those can be removed (?).
+	# 
+
+	# Fix init to work with LXC.  Remove ubuntu services:
+    pushd $ROOTFS/etc/init
+	#rm -f rc-sysinit.conf 	# We keep rc-sysinit.conf and apply the sed below...
+	rm -f console* control* hwclock* module* mount* network-interface* plymouth* procps* tty{4,5,6}.conf udev* upstart*
+	popd
+	
+	# NOTE: THE LATTER URLS HAVE THIS MODIFIED rc-sysinit; INSTEAD WE USE THE SED FROM lxc-ubuntu:
+###	
+###	# Create a skeleton rc-sysinit:
+###	rm -f $ROOTFS/etc/init/rc-sysinit
+###	cat << EOF > $ROOTFS/etc/init/rc-sysinit
+####!/bin/bash
+#### Whatever is needed to clear out old daemon/service pids from your container
+###rm -f $(find /var/run -name '*pid')
+###rm -f /var/lock/apache/*
+###rm -f /var/lock/apache2/*
+###
+###exit 0
+###EOF
+###	chmod a+x /lxc/rootfs.ubuntu/etc/init/rc-sysinit
+	
+	sed -i 's/start on filesystem and net-device-up IFACE=lo/start on filesystem # and net-device-up IFACE=lo/' $ROOTFS/etc/init/rc-sysinit.conf
+	cat >> $ROOTFS/etc/init/lxc.conf << EOF
+# LXC – Fix init sequence to have LXC containers boot with upstart
+
+# description "Fix LXC container - Lucid"
+
+start on startup
+
+task
+pre-start script
+
+# These manual mounts are only needed if you don't use the lxc.mount option.
+# If you use an lxc.mount "fstab" file, then these will cause init to fail.
+###mount -t proc proc /proc
+###mount -t devpts devpts /dev/pts
+###mount -t sysfs sys /sys
+###mount -t tmpfs varrun /var/run
+###mount -t tmpfs varlock /var/lock
+
+mkdir -p /var/run/network
+touch /var/run/utmp
+chmod 664 /var/run/utmp
+chown root.utmp /var/run/utmp
+find /etc/network -name upstart -type f | xargs chmod -x 
+end script
+
+script
+start networking
+
+#
+# FIXME: Are these needed for anything? Found them here:
+# http://www.mail-archive.com/lxc-users@lists.sourceforge.net/msg01231.html
+#
+###initctl emit stopped JOB=udevtrigger --no-wait
+###initctl emit started JOB=udev --no-wait
+
+initctl emit filesystem --no-wait
+initctl emit local-filesystems --no-wait
+initctl emit virtual-filesystems --no-wait
+init 2
+end script
+EOF
+
+	# Unnecessary because we remount /var/run/:
+	###mkdir -p $ROOTFS/var/run/network
+	###touch $ROOTFS/var/run/network/ifstate
+	###mkdir -p $ROOTFS/var/run/sshd
+}
+
+archive_container() {
+	local HOST=$1
+	local ROOTFS=$2
+	
+	# Clean out the local cache before tar'ing:
+	chroot $ROOTFS apt-get clean
+	
+	# Tar it up:
+	pushd $ROOTFS/../
+	tar zcf $HOST.tgz $HOST.conf $HOST.fstab $HOST.rootfs
+	popd
+}
+
+run_debootstrap() {
+	local ROOTFS=$2
+	
+	# Run debootstrap to create a minimal system:
+	mkdir -p $ROOTFS
+	
+	# Can't --include ubuntu-standard, see http://permalink.gmane.org/gmane.linux.vserver/18541
+#	DEBCONF_FRONTEND='noninteractive' debootstrap --verbose --variant=minbase --include console-setup lucid $ROOTFS
+
+	# Must --include console-setup, because with apt-get install, it doesn't respect 'noninteractive' (reason unknown)
+	# FIXME: The "lucid" here should be a config variable.  But it would not be respected if it was changed after the
+	# first "default" template was created.  Thus, we leave it hardcoded as to not mislead users.  Not sure the best way
+	# to fix it... maybe look at /lxc/default.rootfs/etc/issue as a sanity check?
+	#
+	# For now, if you want something other than lucid, delete /lxc/default.rootfs, run lxc-destroy -n default, 
+	# and then edit this line.
+	DEBCONF_FRONTEND='noninteractive' debootstrap --verbose --variant=minbase --include console-setup lucid $ROOTFS
+}
+
+
+initialize_rootfs() {
+	# $1 is $HOST (or $TEMPLATE if creating a template), $2 is $ROOTFS
+	# NOTE: Normally, this will only ever be called for templates.
+	run_debootstrap $1 $2
+	fix_dev $1 $2
+	fix_mtab $1 $2
+	fix_init $1 $2
+}
+
+
+configure_container() {
+	# $1 is $HOST, $2 is $ROOTFS, $3 is $TEMPLATE
+	$CONFDIR/hooks.d/configure_fstab $1 $2 $3
+	$CONFDIR/hooks.d/configure_network $1 $2 $3
+	$CONFDIR/hooks.d/configure_software $1 $2 $3
+	$CONFDIR/hooks.d/configure_lxc $1 $2 $3
+}
+
+
+
+HOST=$1
+ROOTFS=$2
+TEMPLATE=$3
+
+
+# Die on any error:
+set -e
+
+# Make sure the user is running as root.
+
+if [ "$UID" -ne "0" ]; then
+	echo ; echo "  You must be root to run $0.  (Try running 'sudo bash' first.)" ; echo 
+	exit 69
+fi
+
+CONFDIR="."
+if [ -d /etc/lxc-ubuntu-x/hooks.d ] && [ -f /etc/lxc-ubuntu-x/lxc-ubuntu-x.conf ]; then
+	# Use the system-wide config in /etc/lxc-ubuntu-x:
+	CONFDIR="/etc/lxc-ubuntu-x"
+fi
+source $CONFDIR/lxc-ubuntu-x.conf
+# Export theses config vars so they are visible to the hooks:
+export BASEDIR INSTALL_USERNAME INSTALL_PASSWORD AUTHORIZED_KEYS_TO_COPY
+
+
+# If no host name was given, use the first available name of the form servername-lxc-1:
+index=1
+while [ -z "$HOST" ]; do  # 
+	host_candidate=`hostname`"-lxc-"$index
+	if [ ! -d "$BASEDIR/$host_candidate.rootfs" ]; then
+		HOST="$host_candidate"  # We found an unused host name
+		break
+	fi
+	let index="$index+1"
+done
+
+
+if [ -z "$ROOTFS" ]; then
+	ROOTFS="$BASEDIR/$HOST.rootfs"
+fi
+
+
+if [ -z "$TEMPLATE" ]; then
+	TEMPLATE="default"
+fi
+
+
+
+# Important: we don't overwrite an existing rootfs directory:
+if [ -d "$ROOTFS" ]; then
+	echo "ERROR: $ROOTFS already exists.  Exiting."
+	exit 42
+fi
+
+# Also: since we allow any rootfs to also be a template, we need
+# to watch for the corner case that the $HOST and $TEMPLATE are the 
+# same name (to prevent the new HOST from overwriting the TEMPLATE).
+if [ "$HOST" == "$TEMPLATE" ]; then
+	echo "ERROR: A new LXC host cannot be its own template; you have $TEMPLATE for both."
+	exit 43
+fi
+
+
+if [ ! -f "$BASEDIR/$TEMPLATE.tgz" ]; then
+	# Create this new (unknown) tgz archive for use as a template:
+
+	# First, Does the $TEMPLATE rootfs exist?  If not, initialize and configure it this first time:
+	if [ ! -d "$BASEDIR/$TEMPLATE.rootfs" ]; then
+		initialize_rootfs $TEMPLATE "$BASEDIR/$TEMPLATE.rootfs"
+		configure_container $TEMPLATE "$BASEDIR/$TEMPLATE.rootfs" $TEMPLATE
+	fi
+	
+	# tar it up for future use as a template:
+	archive_container $TEMPLATE "$BASEDIR/$TEMPLATE.rootfs"
+fi
+
+#
+# Create the new $HOST from the $TEMPLATE .tgz file:
+#
+###############################################################
+# We need to untar the template into a working dir, so that
+# multiple $HOSTs can be created at the same time without conflict.
+TEMPDIR=`mktemp -d $BASEDIR/tmp.XXXXXXXXXX`
+
+pushd $TEMPDIR
+tar xf "../$TEMPLATE.tgz"
+
+# Rename the .conf and .fstab of the template tarball
+# (just in case the user wants to apply their own .conf template):
+mv "$TEMPLATE.conf"  "../$HOST.conf" 
+mv "$TEMPLATE.fstab" "../$HOST.fstab" 
+# The rootfs may be a relative or absolute path, so we pop out of $BASEDIR/tmp.XXX:
+popd  
+mv "$TEMPDIR/$TEMPLATE.rootfs" "$ROOTFS" 
+ 
+# Remove the (now empty) tmp dir:
+rmdir $TEMPDIR
+###############################################################
+
+
+# Finally, configure and create the container:
+configure_container $HOST $ROOTFS $TEMPLATE
+
+lxc-create -f "$BASEDIR/$HOST.conf" -n $HOST
+
+echo 
+echo 
+echo " LXC container '$HOST' was created.  Start it with this command:"
+echo 
+echo "     lxc-start -d -n $HOST"
+echo
+echo " To have it autostart at system boot, add it to the CONTAINERS option in /etc/default/lxc." 
+echo
+echo " To connect to it on a local console (as user $INSTALL_USERNAME), run:"
+echo
+echo "     lxc-console -t 1 -n $HOST"
+echo
+

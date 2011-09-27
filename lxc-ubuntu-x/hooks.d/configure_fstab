@@ -1,0 +1,67 @@
+#!/bin/bash
+
+HOST=$1
+ROOTFS=$2
+TEMPLATE=$3
+
+
+#
+# See the last 4 lines of the file to enable this:
+#
+SHAREDFS=/lxc/shared
+default_shared() {
+	# Create the fstab:
+	cat <<EOF > $ROOTFS/../$HOST.fstab
+#
+# These are the filesystems that are always mounted on boot, you can
+# override any of these by copying the appropriate line from this file into
+# /etc/fstab and tweaking it as you see fit.  See fstab(5).
+#
+# <file system> <mount point>             <type>          <options>                    <dump> <pass>
+none			$ROOTFS/dev/pts			devpts		defaults		0 0
+none			$ROOTFS/proc			proc		defaults		0 0
+none			$ROOTFS/sys				sysfs		defaults		0 0
+none			$ROOTFS/var/lock		tmpfs		defaults		0 0
+none			$ROOTFS/var/run			tmpfs		defaults		0 0
+
+# WARNING: Unless you have lxc.cap.drop=sys_admin in $HOST.conf, these will be read-write!
+$SHAREDFS/usr	$ROOTFS/usr	none		none		ro,bind			0 0
+$SHAREDFS/lib	$ROOTFS/lib	none		none		ro,bind			0 0
+$SHAREDFS/sbin	$ROOTFS/sbin	none		none		ro,bind			0 0
+$SHAREDFS/bin	$ROOTFS/bin	none		none		ro,bind			0 0
+# Without /lib/modules, there is a warning at lxc-start but it seems harmless (?)
+#/lib/modules		$ROOTFS/lib/modules            none    ro,bind 0 0
+#/etc/resolv.conf	$ROOTFS/etc/resolv.conf none bind 0 0
+EOF
+
+}
+
+
+default() {
+	# Create the fstab:
+	cat <<EOF > $ROOTFS/../$HOST.fstab
+#
+# These are the filesystems that are always mounted on boot, you can
+# override any of these by copying the appropriate line from this file into
+# /etc/fstab and tweaking it as you see fit.  See fstab(5).
+#
+# <file system> <mount point>             <type>          <options>                    <dump> <pass>
+none			$ROOTFS/dev/pts			devpts		defaults		0 0
+none			$ROOTFS/proc			proc		defaults		0 0
+none			$ROOTFS/sys				sysfs		defaults		0 0
+none			$ROOTFS/var/lock		tmpfs		defaults		0 0
+none			$ROOTFS/var/run			tmpfs		defaults		0 0
+# WARNING: Unless you have lxc.cap.drop=sys_admin in $HOST.conf, these will be read-write!
+# Without /lib/modules, there is a warning at lxc-start but it seems harmless (?)
+#/lib/modules		$ROOTFS/lib/modules            none    ro,bind 0 0
+#/etc/resolv.conf	$ROOTFS/etc/resolv.conf none bind 0 0
+EOF
+
+}
+
+# Default with using shared /usr, /lib, /sbin/, /bin:
+###$TEMPLATE || default_shared
+
+# Default with no shared files:
+$TEMPLATE || default
+
